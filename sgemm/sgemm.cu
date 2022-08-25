@@ -68,8 +68,6 @@ __global__ void SgemmNaive(float *mat_a, float *mat_b, float *mat_c, int m, int 
     mat_c[idy * n + idx] = cur;
 }
 
-#define FETCH_FLOAT2(pointer) (reinterpret_cast<float2 *>(&(pointer))[0])
-
 __global__ void SgemmNaive2(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
 {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
@@ -993,6 +991,7 @@ int main(int argc, char *argv[])
         std::cout << "Check SgemmNaive Output: Pass! \n";
         std::cout << std::endl;
     }
+    if (k % 2 == 0)
     {
         // sgemm_naive2 time: 60.8432 ms,  FP32 Perf: 2.25891 TFlops
         PROFILE((SgemmNaive2<<<grid1, block1>>>(mat_a_dev, mat_b_dev, mat_c_dev, m, k, n)),
@@ -1006,6 +1005,7 @@ int main(int argc, char *argv[])
         std::cout << "Check SgemmNaive2 Output: Pass! \n";
         std::cout << std::endl;
     }
+    if (k % 4 == 0)
     {
         // sgemm_naive4 time: 54.8171 ms,  FP32 Perf: 2.50723 TFlops
         PROFILE((SgemmNaive4<<<grid1, block1>>>(mat_a_dev, mat_b_dev, mat_c_dev, m, k, n)),

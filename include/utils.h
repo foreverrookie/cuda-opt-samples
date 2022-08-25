@@ -59,6 +59,7 @@
 
 // LDG.128, LDS.128
 #define FETCH_FLOAT4(pointer) (reinterpret_cast<float4 *>(&(pointer))[0])
+#define FETCH_FLOAT2(pointer) (reinterpret_cast<float2 *>(&(pointer))[0])
 
 // i --- x-coordinate,      j --- y-coordinate
 #define OFFSET(i, j, width) ((j) * (width) + i)

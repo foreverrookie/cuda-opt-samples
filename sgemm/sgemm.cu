@@ -931,6 +931,192 @@ __global__ void Sgemm128x128Buf2(float *mat_a, float *mat_b, float *mat_c, int m
     }
 }
 
+// opt based on Sgemm128x128Buf2
+// inner warp shape: 4x8, thread map: "row" major
+// inter warp shape: 4x2, warp map: "row" major
+__global__ void Sgemm128x128Buf2OptDivisible128(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
+{
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
+
+    // start index of matrix C in current block
+    int start_row_c = blockIdx.y * 128;
+    int start_col_c = blockIdx.x * 128;
+
+    __shared__ float __align__(16) mat_a_shm[2][8][128]; // 128 x 8, double buffer
+    __shared__ float __align__(16) mat_b_shm[2][8][128]; // 8 x 128, double buffer
+
+    float mat_a_ldg128[4]; // load global(LDG.128), double buffer
+    float mat_b_ldg128[4]; // load global(LDG.128), double buffer
+
+    float mat_a_frag[2][8]; // thread tile, double buffer
+    float mat_b_frag[2][8]; // thread tile, double buffer
+    float mat_c_accum[8][8] = {0};
+
+    int tid_mod_2 = tid % 2;
+    int tid_div_2 = tid / 2;
+
+    // produce: load first smem buffer(step 1 of 2), gmem -> smem
+    {
+        // load mat_a(LDG.128), gmem -> rf -> shm, transpose for consecutive access in outer product
+        FETCH_FLOAT4(mat_a_ldg128[0]) =
+            FETCH_FLOAT4(mat_a[OFFSET(0, start_row_c, k) +            /* main loop offset */
+                               OFFSET(tid_mod_2 * 4, tid_div_2, k)]); /* thread offset */
+
+        mat_a_shm[0][tid_mod_2 * 4][tid_div_2] = mat_a_ldg128[0];
+        mat_a_shm[0][tid_mod_2 * 4 + 1][tid_div_2] = mat_a_ldg128[1];
+        mat_a_shm[0][tid_mod_2 * 4 + 2][tid_div_2] = mat_a_ldg128[2];
+        mat_a_shm[0][tid_mod_2 * 4 + 3][tid_div_2] = mat_a_ldg128[3];
+
+        // load mat_b(LDG.128), gmem -> shm
+        FETCH_FLOAT4(mat_b_shm[0][warp_id][lane_id * 4]) =
+            FETCH_FLOAT4(mat_b[OFFSET(start_col_c, 0, n) +        /* main loop offset */
+                               OFFSET(lane_id * 4, warp_id, n)]); /* thread offset */
+    }
+    __syncthreads();
+
+    int shm_a_offset = (warp_id / 2) * 32 + (lane_id / 8) * 4;
+    int shm_b_offset = (warp_id % 2) * 64 + (lane_id % 8) * 4;
+    // produce: load first rf buffer(step 1 of 8), smem -> rf
+    {
+        FETCH_FLOAT4(mat_a_frag[0][0]) =
+            FETCH_FLOAT4(mat_a_shm[0][0][shm_a_offset]);
+        FETCH_FLOAT4(mat_a_frag[0][4]) =
+            FETCH_FLOAT4(mat_a_shm[0][0][shm_a_offset + 16]);
+
+        FETCH_FLOAT4(mat_b_frag[0][0]) =
+            FETCH_FLOAT4(mat_b_shm[0][0][shm_b_offset]);
+        FETCH_FLOAT4(mat_b_frag[0][4]) =
+            FETCH_FLOAT4(mat_b_shm[0][0][shm_b_offset + 32]);
+    }
+
+    int smem_consume_id = 0;
+
+    // i start from 8, beacuse first tile is loaded from gmem to smem
+    for (int i = 8; i < k; i += 8)
+    {
+        // smem produce: load next mat_a & mat_b tile, gmem -> rf
+        {
+            FETCH_FLOAT4(mat_a_ldg128[0]) =
+                FETCH_FLOAT4(mat_a[OFFSET(i, start_row_c, k) +            /* main loop offset */
+                                   OFFSET(tid_mod_2 * 4, tid_div_2, k)]); /* thread offset */
+
+            FETCH_FLOAT4(mat_b_ldg128[0]) =
+                FETCH_FLOAT4(mat_b[OFFSET(start_col_c, i, n) +        /* main loop offset */
+                                   OFFSET(lane_id * 4, warp_id, n)]); /* thread offset */
+        }
+
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+        {
+            // smem produce: store next mat_a & mat_b tile, rf -> smem
+            if (j == 7)
+            {
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4][tid_div_2] = mat_a_ldg128[0];
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4 + 1][tid_div_2] = mat_a_ldg128[1];
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4 + 2][tid_div_2] = mat_a_ldg128[2];
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4 + 3][tid_div_2] = mat_a_ldg128[3];
+
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id ^ 1][warp_id][lane_id * 4]) =
+                    FETCH_FLOAT4(mat_b_ldg128[0]);
+
+                __syncthreads();
+
+                smem_consume_id ^= 1;
+            }
+
+            // rf produce: load next mat_a & mat_b fragment, smem -> rf
+            // 4 element load(LDS.128) in single instruction, two instructions
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset]);
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset + 16]);
+
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset]);
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset + 32]);
+
+// rf consume
+#pragma unroll
+            for (int u = 0; u < 8; ++u)
+            {
+#pragma unroll
+                for (int v = 0; v < 8; ++v)
+                {
+                    mat_c_accum[u][v] += mat_a_frag[j % 2][u] * mat_b_frag[j % 2][v];
+                }
+            }
+        }
+    }
+
+// consume last fragment
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+    {
+        // produce: load next mat_a & mat_b fragment, smem -> rf
+        if (j < 7)
+        {
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset]);
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset + 16]);
+
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset]);
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset + 32]);
+        }
+
+#pragma unroll
+        for (int u = 0; u < 8; ++u)
+        {
+#pragma unroll
+            for (int v = 0; v < 8; ++v)
+            {
+                mat_c_accum[u][v] += mat_a_frag[j % 2][u] * mat_b_frag[j % 2][v];
+            }
+        }
+    }
+
+    int write_base_offset = OFFSET(start_col_c, start_row_c, n) +               /* block offset */
+                            OFFSET((warp_id % 2) * 64, (warp_id / 2) * 32, n) + /* warp offset */
+                            OFFSET((lane_id % 8) * 4, (lane_id / 8) * 4, n);    /* thread offset */
+// write to mat_c
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // x o
+        // o o
+        FETCH_FLOAT4(mat_c[write_base_offset + i * n]) = FETCH_FLOAT4(mat_c_accum[i][0]);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // o x
+        // o o
+        FETCH_FLOAT4(mat_c[write_base_offset + 32 + i * n]) = FETCH_FLOAT4(mat_c_accum[i][4]);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // o o
+        // x o
+        FETCH_FLOAT4(mat_c[write_base_offset + 16 * n + i * n]) = FETCH_FLOAT4(mat_c_accum[i + 4][0]);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // o o
+        // o x
+        FETCH_FLOAT4(mat_c[write_base_offset + 16 * n + i * n + 32]) = FETCH_FLOAT4(mat_c_accum[i + 4][4]);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     int m = 4096;

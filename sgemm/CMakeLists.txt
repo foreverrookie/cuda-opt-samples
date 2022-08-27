@@ -5,8 +5,3 @@ target_link_libraries(sgemm
     CUDA::cudart
     CUDA::cublas
 )
-
-set_property(TARGET sgemm
-    PROPERTY
-    CUDA_ARCHITECTURES 80
-)

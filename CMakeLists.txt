@@ -1,4 +1,4 @@
-project(high-perf-cuda-op CXX CUDA)
+project(cuda-opt-samples CXX CUDA)
 
 cmake_minimum_required(VERSION 3.18)
 

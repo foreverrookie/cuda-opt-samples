@@ -9,6 +9,8 @@ cmake . -B build
 cmake --build build
 ```
 
+> Note: Please specify `CMAKE_CUDA_ARCHITECTURES`, if your have a pre-Ampere GPU.
+
 run sgemm
 ```bash
 ./build/sgemm/sgemm [m] [k] [n]

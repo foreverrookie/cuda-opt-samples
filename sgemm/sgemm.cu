@@ -492,7 +492,7 @@ __global__ void Sgemm128x128(float *mat_a, float *mat_b, float *mat_c, int m, in
     }
 }
 
-__global__ void Sgemm128x128Buf2Divisible128(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
+__launch_bounds__(256, 2) __global__ void Sgemm128x128Buf2Divisible128(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
 {
     int tid = threadIdx.x;
     int warp_id = tid / 32;
@@ -673,7 +673,7 @@ __global__ void Sgemm128x128Buf2Divisible128(float *mat_a, float *mat_b, float *
     }
 }
 
-__global__ void Sgemm128x128Buf2(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
+__launch_bounds__(256, 2) __global__ void Sgemm128x128Buf2(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
 {
     int tid = threadIdx.x;
     int warp_id = tid / 32;
@@ -934,7 +934,7 @@ __global__ void Sgemm128x128Buf2(float *mat_a, float *mat_b, float *mat_c, int m
 // opt based on Sgemm128x128Buf2
 // inner warp shape: 4x8, thread map: "row" major
 // inter warp shape: 4x2, warp map: "row" major
-__global__ void Sgemm128x128Buf2OptDivisible128(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
+__launch_bounds__(256, 2) __global__ void Sgemm128x128Buf2OptDivisible128(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
 {
     int tid = threadIdx.x;
     int warp_id = tid / 32;
@@ -1117,7 +1117,7 @@ __global__ void Sgemm128x128Buf2OptDivisible128(float *mat_a, float *mat_b, floa
     }
 }
 
-__global__ void Sgemm128x128Buf2Opt(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
+__launch_bounds__(256, 2) __global__ void Sgemm128x128Buf2Opt(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
 {
     int tid = threadIdx.x;
     int warp_id = tid / 32;

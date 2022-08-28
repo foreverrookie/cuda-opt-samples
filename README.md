@@ -52,6 +52,6 @@ Here, I adopt config in [CUTLASS](https://github.com/NVIDIA/cutlass).
     | Block computation granularity |  128 x 128        |
     | Warp Shape        | 8 x 4 |
 
-5. Kernel `Sgemm128x128Buf2` is based on `Sgemm128x128Buf2Divisible128` which assume input size(m,k,n) is a multiple of 128. It applys two buffers in shared memory & register files, and gets 17.0397 TFlops(89% to cuBLAS) performance.
+5. Kernel `Sgemm128x128Buf2` is based on `Sgemm128x128Buf2Divisible128` which assume input size(m,k,n) is a multiple of 128. It applys double buffers in shared memory & register files, and gets 17.0397 TFlops(89% to cuBLAS) performance.
 
     > Further optimization for kernel `Sgemm128x128Buf2` is coming soon.

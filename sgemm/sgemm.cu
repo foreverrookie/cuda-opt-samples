@@ -1117,6 +1117,272 @@ __global__ void Sgemm128x128Buf2OptDivisible128(float *mat_a, float *mat_b, floa
     }
 }
 
+__global__ void Sgemm128x128Buf2Opt(float *mat_a, float *mat_b, float *mat_c, int m, int k, int n)
+{
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
+
+    // start index of matrix C in current block
+    int start_row_c = blockIdx.y * 128;
+    int start_col_c = blockIdx.x * 128;
+
+    __shared__ float __align__(16) mat_a_shm[2][8][128]; // 128 x 8, double buffer
+    __shared__ float __align__(16) mat_b_shm[2][8][128]; // 8 x 128, double buffer
+
+    float mat_a_ldg128[4]; // load global(LDG.128), double buffer
+    float mat_b_ldg128[4]; // load global(LDG.128), double buffer
+
+    float mat_a_frag[2][8]; // thread tile, double buffer
+    float mat_b_frag[2][8]; // thread tile, double buffer
+    float mat_c_accum[8][8] = {0};
+
+    int tid_mod_2 = tid % 2;
+    int tid_div_2 = tid / 2;
+
+    int ver_offset = start_row_c + tid_div_2; // vertical offset
+    int hor_offset = tid_mod_2 * 4;           // horizontal offset
+    // produce: load first smem buffer(step 1 of 2), gmem -> smem
+    {
+        // load mat_a(LDG.128), gmem -> rf -> shm, transpose for consecutive access in outer product
+        if (ver_offset < m)
+        {
+            for (int j = 0; j < 4; ++j)
+            {
+                if (j + hor_offset < k)
+                {
+                    mat_a_shm[0][tid_mod_2 * 4 + j][tid_div_2] = mat_a[OFFSET(j + hor_offset, ver_offset, k)];
+                }
+                else
+                {
+                    mat_a_shm[0][tid_mod_2 * 4 + j][tid_div_2] = 0.0f;
+                }
+            }
+        }
+
+        ver_offset = warp_id;
+        hor_offset = start_col_c + lane_id * 4;
+
+        // load mat_b(LDG.128), gmem -> shm
+        if (ver_offset < k)
+        {
+            for (int j = 0; j < 4; ++j)
+            {
+                if (j + hor_offset < n)
+                {
+                    mat_b_shm[0][warp_id][lane_id * 4 + j] = mat_b[OFFSET(j + hor_offset, ver_offset, n)];
+                }
+                else
+                {
+                    mat_b_shm[0][warp_id][lane_id * 4 + j] = 0.0f;
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    int shm_a_offset = (warp_id / 2) * 32 + (lane_id / 8) * 4;
+    int shm_b_offset = (warp_id % 2) * 64 + (lane_id % 8) * 4;
+    // produce: load first rf buffer(step 1 of 8), smem -> rf
+    {
+        FETCH_FLOAT4(mat_a_frag[0][0]) =
+            FETCH_FLOAT4(mat_a_shm[0][0][shm_a_offset]);
+        FETCH_FLOAT4(mat_a_frag[0][4]) =
+            FETCH_FLOAT4(mat_a_shm[0][0][shm_a_offset + 16]);
+
+        FETCH_FLOAT4(mat_b_frag[0][0]) =
+            FETCH_FLOAT4(mat_b_shm[0][0][shm_b_offset]);
+        FETCH_FLOAT4(mat_b_frag[0][4]) =
+            FETCH_FLOAT4(mat_b_shm[0][0][shm_b_offset + 32]);
+    }
+
+    int smem_consume_id = 0;
+
+    // i start from 8, beacuse first tile is loaded from gmem to smem
+    for (int i = 8; i < k; i += 8)
+    {
+        // smem produce: load next mat_a & mat_b tile, gmem -> rf
+        {
+            ver_offset = start_row_c + tid_div_2; // vertical offset
+            hor_offset = i + tid_mod_2 * 4;       // horizontal offset
+
+            if (ver_offset < m)
+            {
+                for (int j = 0; j < 4; ++j)
+                {
+                    if (j + hor_offset < k)
+                    {
+                        mat_a_ldg128[j] = mat_a[OFFSET(j + hor_offset, ver_offset, k)];
+                    }
+                    else
+                    {
+                        mat_a_ldg128[j] = 0.0f;
+                    }
+                }
+            }
+
+            ver_offset = i + warp_id;
+            hor_offset = start_col_c + lane_id * 4;
+
+            if (ver_offset < k)
+            {
+                for (int j = 0; j < 4; ++j)
+                {
+                    if (j + hor_offset < n)
+                    {
+                        mat_b_ldg128[j] = mat_b[OFFSET(j + hor_offset, ver_offset, n)];
+                    }
+                    else
+                    {
+                        mat_b_ldg128[j] = 0.0f;
+                    }
+                }
+            }
+        }
+
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+        {
+            // smem produce: store next mat_a & mat_b tile, rf -> smem
+            if (j == 7)
+            {
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4][tid_div_2] = mat_a_ldg128[0];
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4 + 1][tid_div_2] = mat_a_ldg128[1];
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4 + 2][tid_div_2] = mat_a_ldg128[2];
+                mat_a_shm[smem_consume_id ^ 1][tid_mod_2 * 4 + 3][tid_div_2] = mat_a_ldg128[3];
+
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id ^ 1][warp_id][lane_id * 4]) =
+                    FETCH_FLOAT4(mat_b_ldg128[0]);
+
+                __syncthreads();
+
+                smem_consume_id ^= 1;
+            }
+
+            // rf produce: load next mat_a & mat_b fragment, smem -> rf
+            // 4 element load(LDS.128) in single instruction, two instructions
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset]);
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset + 16]);
+
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset]);
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset + 32]);
+
+// rf consume
+#pragma unroll
+            for (int u = 0; u < 8; ++u)
+            {
+#pragma unroll
+                for (int v = 0; v < 8; ++v)
+                {
+                    mat_c_accum[u][v] += mat_a_frag[j % 2][u] * mat_b_frag[j % 2][v];
+                }
+            }
+        }
+    }
+
+// consume last fragment
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+    {
+        // produce: load next mat_a & mat_b fragment, smem -> rf
+        if (j < 7)
+        {
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset]);
+            FETCH_FLOAT4(mat_a_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_a_shm[smem_consume_id][(j + 1) % 8][shm_a_offset + 16]);
+
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][0]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset]);
+            FETCH_FLOAT4(mat_b_frag[(j + 1) % 2][4]) =
+                FETCH_FLOAT4(mat_b_shm[smem_consume_id][(j + 1) % 8][shm_b_offset + 32]);
+        }
+
+#pragma unroll
+        for (int u = 0; u < 8; ++u)
+        {
+#pragma unroll
+            for (int v = 0; v < 8; ++v)
+            {
+                mat_c_accum[u][v] += mat_a_frag[j % 2][u] * mat_b_frag[j % 2][v];
+            }
+        }
+    }
+
+    // int write_base_offset = OFFSET(start_col_c, start_row_c, n) +               /* block offset */
+    //                         OFFSET((warp_id % 2) * 64, (warp_id / 2) * 32, n) + /* warp offset */
+    //                         OFFSET((lane_id % 8) * 4, (lane_id / 8) * 4, n);    /* thread offset */
+
+    // int ver_offset_c = start_row_c + (warp_id % 2) * 64 + (lane_id % 8) * 4;
+    // int hor_offset_c = start_col_c + (warp_id / 2) * 32 + (lane_id / 8) * 4;
+    int ver_offset_c = start_row_c + (warp_id / 2) * 32 + (lane_id / 8) * 4;
+    int hor_offset_c = start_col_c + (warp_id % 2) * 64 + (lane_id % 8) * 4;
+// write to mat_c
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // x o
+        // o o
+
+        if (ver_offset_c + i < m)
+        {
+            for (int j = 0; (j < 4) && (j < n - hor_offset_c); ++j)
+            {
+                mat_c[OFFSET(hor_offset_c + j, ver_offset_c + i, n)] = mat_c_accum[i][j];
+            }
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // o x
+        // o o
+
+        if (ver_offset_c + i < m)
+        {
+            for (int j = 0; (j < 4) && (j < n - hor_offset_c - 32); ++j)
+            {
+                mat_c[OFFSET(hor_offset_c + 32 + j, ver_offset_c + i, n)] = mat_c_accum[i][4 + j];
+            }
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // o o
+        // x o
+
+        if (ver_offset_c + 16 + i < m)
+        {
+            for (int j = 0; (j < 4) && (j < n - hor_offset_c); ++j)
+            {
+                mat_c[OFFSET(hor_offset_c + j, ver_offset_c + 16 + i, n)] = mat_c_accum[i + 4][j];
+            }
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+    {
+        // o o
+        // o x
+
+        if (ver_offset_c + 16 + i < m)
+        {
+            for (int j = 0; (j < 4) && (j < n - hor_offset_c - 32); ++j)
+            {
+                mat_c[OFFSET(hor_offset_c + j + 32, ver_offset_c + 16 + i, n)] = mat_c_accum[i + 4][4 + j];
+            }
+        }
+    }
+}
+
 int main(int argc, char *argv[])
 {
     int m = 4096;
@@ -1249,6 +1515,20 @@ int main(int argc, char *argv[])
 
         CheckCudaOutput(cublas_c, cuda_c);
         std::cout << "Check Sgemm128x128Buf2 Output: Pass! \n";
+        std::cout << std::endl;
+    }
+    {
+        // sgemm_128x128_2buf_opt_Divisible128 time:  ms,    FP32 Perf:  TFlops
+        // sgemm_128x128_2buf_opt              time:  ms,    FP32 Perf:  TFlops
+        PROFILE((Sgemm128x128Buf2Opt<<<grid2, block2>>>(mat_a_dev, mat_b_dev, mat_c_dev, m, k, n)),
+                sgemm_128x128_2buf_opt, m, k, n);
+
+        CUDA_CHECK(cudaMemcpy(cuda_c.data(), mat_c_dev, m * n * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaGetLastError());
+
+        CheckCudaOutput(cublas_c, cuda_c);
+        std::cout << "Check Sgemm128x128Buf2Opt Output: Pass! \n";
         std::cout << std::endl;
     }
 

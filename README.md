@@ -9,7 +9,7 @@ cmake . -B build
 cmake --build build
 ```
 
-> Note: Please specify `CMAKE_CUDA_ARCHITECTURES`, if your have a pre-Ampere GPU.
+> Note: If `CMAKE_CUDA_ARCHITECTURES` is not assigned, 86 is adopted.
 
 run sgemm
 ```bash

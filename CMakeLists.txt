@@ -5,7 +5,9 @@ cmake_minimum_required(VERSION 3.18)
 find_package(CUDAToolkit REQUIRED)
 
 # set Ampere Arch
-set(CMAKE_CUDA_ARCHITECTURES 80)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 86)
+endif()
 
 include_directories(include)
 

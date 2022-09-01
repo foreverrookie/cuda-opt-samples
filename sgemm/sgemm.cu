@@ -944,7 +944,8 @@ __global__ void Sgemm128x128Buf2OptDivisible128(float *mat_a, float *mat_b, floa
     int start_row_c = blockIdx.y * 128;
     int start_col_c = blockIdx.x * 128;
 
-    __shared__ float __align__(16) mat_a_shm[2][8][128]; // 128 x 8, double buffer
+    // 128 x 8(132 x 8, reduce some bank conflict, float4 access aligned), double buffer
+    __shared__ float __align__(16) mat_a_shm[2][8][132];
     __shared__ float __align__(16) mat_b_shm[2][8][128]; // 8 x 128, double buffer
 
     float mat_a_ldg128[4]; // load global(LDG.128), double buffer
@@ -1127,7 +1128,8 @@ __global__ void Sgemm128x128Buf2Opt(float *mat_a, float *mat_b, float *mat_c, in
     int start_row_c = blockIdx.y * 128;
     int start_col_c = blockIdx.x * 128;
 
-    __shared__ float __align__(16) mat_a_shm[2][8][128]; // 128 x 8, double buffer
+    // 128 x 8(132 x 8, reduce some bank conflict, float4 access aligned), double buffer
+    __shared__ float __align__(16) mat_a_shm[2][8][132];
     __shared__ float __align__(16) mat_b_shm[2][8][128]; // 8 x 128, double buffer
 
     float mat_a_ldg128[4]; // load global(LDG.128), double buffer

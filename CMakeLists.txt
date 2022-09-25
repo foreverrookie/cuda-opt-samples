@@ -12,3 +12,4 @@ endif()
 include_directories(include)
 
 add_subdirectory(sgemm)
+add_subdirectory(reduce)

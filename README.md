@@ -7,7 +7,7 @@ To be continued.
 
 ```bash
 cmake . -B build
-cmake --build build
+cmake --build build --config Release
 ```
 
 > Note: If `CMAKE_CUDA_ARCHITECTURES` is not assigned, 86 is adopted.
